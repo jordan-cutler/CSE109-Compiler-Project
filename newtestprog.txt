@@ -1,0 +1,12 @@
+function main() {
+
+	var a, b, c;
+
+	a = 5;
+	b = 10;
+	c = (a + b) * 25;
+
+	if(b == a) {
+		b = a + b;
+	}
+}

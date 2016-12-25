@@ -1,0 +1,806 @@
+/*
+  CSE 109
+  Jordan Cutler
+  jdc219
+  Program Description: Parses the tokens and creates a tree of
+  commands which will later be iterated through and execute the commands.
+  Program #5
+*/
+
+#include "parser.h"
+#include <cstring>
+#include <cstdlib>
+#include <string>
+
+const string Parser::ops[] = {"ADD", "SUB", "MULT", "DIV",
+
+		      "ISEQ", "ISNE", "ISLT", "ISLE", "ISGT", "ISGE",
+
+		      "AND", "OR",
+
+		      "PUSHL", "PUSHV", "STORE",
+
+		      "JUMP", "JUMPF", "JUMPT", "CALL", "RET", "FUNC",
+
+		      "PRINTF",
+		      
+		      "LABEL", "SEQ" };
+
+Parser::Parser(Lexer& lexerx, ostream& outx): lexer(lexerx), out(outx), lindex(1), jindex(1), tindex(1), variableStack(100), params(100) {
+  token = lexer.nextToken();
+}
+
+Parser::~Parser() {
+}
+
+void Parser::error(string message) {
+  cerr << message << " Found " << token.getLexeme() << " at line " <<
+    token.getLine() << " position " << token.getPos() << endl;
+  exit(1);
+}
+
+void Parser::check(int tokenType, string message) {
+  if (token.getType() != tokenType)
+    error(message);
+}
+
+void Parser::cond(string instruction) {
+  string j1 = jLabel();
+  string j2 = jLabel();
+  emit("  pop rbx");
+  emit("  pop rax");
+  emit("  cmp rax,rbx");
+  emit("  " + instruction + " " + j1);
+  emit("  mov rax,0");
+  emit("  jmp " + j2);
+  emit(j1 + ":");
+  emit("  mov rax,1");
+  emit(j2 + ":");
+  emit("  push rax");
+}
+
+void Parser::divInstruction() {
+  emit("  mov rdx,0");
+  emit("  pop rbx");
+  emit("  pop rax");
+  emit("  idiv rbx");
+  emit("  push rax");
+}
+
+void Parser::multInstruction() {
+  emit("  pop rbx");
+  emit("  pop rax");
+  emit("  imul rbx");
+  emit("  push rax");
+}
+
+void Parser::addSubAndOrInstruction(string instruction) {
+  instruction = sToLower(instruction);
+  emit("  pop rbx");
+  emit("  pop rax");
+  emit("  " + instruction + " " + "rax, rbx");
+  emit("  push rax");
+}
+
+
+string currentFunc;
+int nfmts = 0;
+string fmts[100];
+void Parser::geninst(TreeNode *node) {
+  Operation op;
+  if (node != NULL) {
+    geninst(node->leftChild);
+    geninst(node->rightChild);
+    op = node->op;
+    switch(op) {
+    case SEQ:
+      break;
+    case ADD:
+    case SUB:
+    case AND:
+    case OR:
+      addSubAndOrInstruction(ops[op]);
+      break;
+    case MULT:
+      multInstruction();
+      break;
+    case DIV:
+      divInstruction();
+      break;
+    case LABEL:
+      emit(node->val);
+      break;
+    case ISEQ:
+      cond("je");
+      break;
+    case ISNE:
+      cond("jne");
+      break;
+    case ISLT:
+      cond("jl");
+      break;
+    case ISLE:
+      cond("jle");
+      break;
+    case ISGT:
+      cond("jg");
+      break;
+    case ISGE:
+      cond("jge");
+      break;
+    case JUMP:
+      emit("  jmp " + node->val);
+      break;
+    case JUMPF:
+      emit("  pop rax");
+      emit("  cmp rax,0");
+      emit("  je " + node->val);
+      break;
+    case JUMPT:
+      emit("  pop rax");
+      emit("  cmp rax,0");
+      emit("  jne " + node->val);
+      break;
+    case PUSHV:
+      emit("  push qword[" + node->val +"]");
+      break;
+    case PUSHL:
+      emit("  mov rax," + node->val);
+      emit("  push rax");
+      break;
+    case STORE:
+      emit("  pop qword[" + node->val + "]");
+      break;
+    case PRINTF:
+      printfInstruction(node);
+      break;
+    case CALL:
+      emit("  call " + node->val);
+      emit("  push rax");
+      break;
+    case FUNC:
+      currentFunc = node->val;
+      emit(currentFunc);
+      if (currentFunc != "main:") {
+	emit("  pop r15");
+      }
+      break;
+    case RET:
+      emit("  pop rax");
+      if (currentFunc != "main:") {
+	emit("  push r15");
+	emit("  ret");
+      }
+      else {
+	emit("  ret");
+	emit("  mov eax, 1");
+	emit("  int 0x80");
+      }
+      break;
+    default:
+      error("Unrecognized instruction " + ops[op]);
+      break;
+    }
+    // process current node: do whatever you would do. (generate
+    // assembly language instructions.
+    // sequence nodes do not generate any code
+  }
+}
+
+void Parser::printfInstruction(TreeNode* node) {
+  fmt = node->val;
+  nparams = fmt.at(0) - '0';
+  fmt = "`" + fmt.substr(1) + "`"; // wrapped in backticks because it
+				   // works well with assembler
+  fmts[nfmts++] = fmt;
+  emit("  mov rdi,fmt" + itos(nfmts));
+  if (nparams == 5) {
+    emit("  pop r9");
+    --nparams;
+  }
+  if (nparams == 4) {
+    emit("  pop r8");
+    --nparams;
+  }
+  if (nparams == 3) {
+    emit("  pop rcx");
+    --nparams;
+  }
+  if (nparams == 2) {
+    emit("  pop rdx");
+    --nparams;
+  }
+  if (nparams == 1) {
+    emit("  pop rsi");
+  }
+  emit("  mov rax,0");
+  emit("  push rbp");
+  emit("  call printf");
+  emit("  pop rbp");
+}
+
+void Parser::vardefs(TreeNode *node) {
+  Operation op;
+  if (node != NULL) {
+    vardefs(node->leftChild);
+    vardefs(node->rightChild);
+    op = node->op;
+    if (op == PUSHV || op == STORE) {
+      string variableToAdd = node->val;
+      if (!variableStack.contains(variableToAdd)) {
+	variableStack.push(variableToAdd);
+      }
+    }
+  }
+}
+
+void Parser::genasm(TreeNode *node) {
+  // #3 on instruction sheet
+  emit("  global main");
+  emit("  extern printf");
+  emit("");
+  emit("  segment .bss");
+  vardefs(node);
+  for (int i = 0; i <= variableStack.getTos(); i++) {
+    emit("  " + variableStack[i] + " resq 1");
+  }
+
+  emit("");
+  emit("  section .text");
+  geninst(node);
+
+  emit("");
+  emit("  section .data");
+  for (int i = 0; i < nfmts; i++) {
+    emit("  fmt" + itos(i+1) + ": db " + fmts[i] + ", 0");
+  }
+}
+
+Parser::TreeNode* Parser::printfStatement() {
+  TreeNode* paramList = NULL;
+  int nparams = 0;
+  check(Token::PRINTF, "Expecting printf");
+  token = lexer.nextToken();
+  check(Token::LPAREN, "Expecting (");
+  token = lexer.nextToken();
+  check(Token::STRINGLIT, "Expecting string literal");
+  string formatString = token.getLexeme();
+  token = lexer.nextToken();
+  if (token.getType() == Token::COMMA) {
+    token = lexer.nextToken();
+    paramList = expression();
+    ++nparams;
+    while (token.getType() == Token::COMMA) {
+      token = lexer.nextToken();
+      paramList = new TreeNode(SEQ, paramList, expression());
+      ++nparams;
+    }
+  }
+  check(Token::RPAREN, "Expecting )");
+  token = lexer.nextToken();
+  check(Token::SEMICOLON, "Expecting ;");
+  token = lexer.nextToken();
+  TreeNode* printStatement = new TreeNode(SEQ, paramList, new TreeNode(PRINTF, itos(nparams) + formatString));
+  return printStatement;
+}
+
+Parser::TreeNode* Parser::factor() {
+  TreeNode* factorNode = NULL;
+  string variable = token.getLexeme();
+  string uniqueSymbol;
+  
+  switch (token.getType()) {
+  case Token::INTLIT:
+    factorNode = new TreeNode(PUSHL, variable); // push literal. push
+					      // the lexeme of the
+					      // token.
+    token = lexer.nextToken();
+    break;
+  case Token::LPAREN:
+    token = lexer.nextToken();
+    factorNode = expression();
+    check(Token::RPAREN, "Expecting )");
+    token = lexer.nextToken();
+    break;
+  case Token::IDENT:
+    token = lexer.nextToken();
+    uniqueSymbol = symbolTable.getUniqueSymbol(variable);
+    if (token.getType() == Token::LPAREN) {
+      token = lexer.nextToken();
+      factorNode = funcall(variable);
+    }
+    else {
+      if (uniqueSymbol == "") {
+      	error("Use of undeclared variable.");
+      }
+      factorNode = new TreeNode(PUSHV, uniqueSymbol);
+    }
+    break;
+  default:
+    error("Expected an INTLIT, LPAREN, IDENT, or <funcall>.");
+    break;
+  }
+  return factorNode;
+}
+
+Parser::TreeNode* Parser::term() {
+  TreeNode* termNode = factor();
+  TreeNode* factorNode;
+  int tokenType = token.getType();
+  while (tokenType == Token::TIMES || tokenType == Token::DIVIDE) {
+    token = lexer.nextToken();
+    factorNode = factor();
+    Operation op;
+    switch (tokenType) {
+    case Token::TIMES:
+      op = MULT;
+      break;
+    case Token::DIVIDE:
+      op = DIV;
+      break;
+    }
+    termNode = new TreeNode(op, termNode, factorNode);
+    tokenType = token.getType();
+  }
+  return termNode;
+}
+
+Parser::TreeNode* Parser::expression() {
+  TreeNode* expressionNode = term();
+  TreeNode* termNode;
+  int tokenType = token.getType();
+  while (tokenType == Token::PLUS || tokenType == Token::MINUS) {
+    token = lexer.nextToken();
+    termNode = term();
+    Operation op;
+    switch(tokenType) {
+    case Token::PLUS:
+      op = ADD;
+      break;
+    case Token::MINUS:
+      op = SUB;
+      break;
+    }
+    expressionNode = new TreeNode(op, expressionNode, termNode);
+    tokenType = token.getType();
+  }
+  return expressionNode;
+}
+
+Parser::TreeNode* Parser::relationalExpression() {
+  TreeNode* relationalExpressionNode = expression();
+  TreeNode* expressionNode;
+  int tokenType = token.getType();
+  Operation op;
+  if (tokenType == Token::EQ || tokenType == Token::LT || tokenType == Token::LE ||
+      tokenType == Token::GT || tokenType == Token::GE || tokenType == Token::NE) {
+  switch(tokenType) {
+  case Token::EQ:
+    op = ISEQ;
+    break;
+  case Token::LT:
+    op = ISLT;
+    break;
+  case Token::LE:
+    op = ISLE;
+    break;
+  case Token::GT:
+    op = ISGT;
+    break;
+  case Token::GE:
+    op = ISGE;
+    break;
+  case Token::NE:
+    op = ISNE;
+    break;
+  default:
+    break;
+  }
+  token = lexer.nextToken();
+  expressionNode = expression();
+  relationalExpressionNode = new TreeNode(op, relationalExpressionNode, expressionNode);
+  }
+  return relationalExpressionNode;
+}
+
+Parser::TreeNode* Parser::logicalExpression() {
+  TreeNode* logicalExpressionNode = relationalExpression();
+  TreeNode* relationalExpressionNode;
+  int tokenType = token.getType();
+  while (tokenType == Token::AND || tokenType == Token::OR) {
+    token = lexer.nextToken();
+    relationalExpressionNode = relationalExpression();
+    Operation op;
+    switch(tokenType) {
+    case Token::AND:
+      op = AND;
+      break;
+    case Token::OR:
+      op = OR;
+      break;
+    }
+    logicalExpressionNode = new TreeNode(op, logicalExpressionNode, relationalExpressionNode);
+    tokenType = token.getType();
+  }
+  return logicalExpressionNode;
+}
+
+Parser::TreeNode* Parser::ifStatement() {
+  TreeNode* logicalExpressionNode = NULL;
+  string label1;
+  string label2;
+
+  check(Token::IF, "Expected 'if'.");
+  // move to see if a LPAREN follows "if"
+  token = lexer.nextToken();
+  check(Token::LPAREN, "Expected '('.");
+  
+  // move to get the logicalExpression contained in the parens
+  token = lexer.nextToken();
+  logicalExpressionNode = logicalExpression();
+  
+  // logical expression called nextToken() at the end, so we can
+  // check if the one after the logical expression is a RPAREN
+  check(Token::RPAREN, "Expected ')'.");
+  token = lexer.nextToken();
+  // Get the block of code in the if statement
+  symbolTable.enterScope();
+  TreeNode* ifBlock = block();
+  symbolTable.exitScope();
+  // This label may be used for the end of the if block or end of
+  // the else block, depending on if an else exists
+  label1 = makeLabel();
+  
+  // block() left us at the next token after the right brace, so we
+  // can check if an else block follows.
+  if (token.getLexeme() == "else") {
+    // Move on to what should be the left brace of the else block
+    token = lexer.nextToken();
+    
+    // For if the condition is false, then jump to the else block.
+    TreeNode* jumpfNode = new TreeNode(JUMPF, label1);
+    // This is where we will jump to if the condition is false.
+    TreeNode* ifConditionFalseLabel = new TreeNode(LABEL, (label1 + ":"));
+
+    // Get the block of code in the else
+    symbolTable.enterScope();
+    TreeNode* elseBlock = block();
+    symbolTable.exitScope();
+    // Make a label for Going to the end of the else, if the
+    // statement in the if condition was true
+    label2 = makeLabel();
+    // For if the condition is true, we'll jump to the end of the
+    // else block once running through the if block
+    TreeNode* jumpNode = new TreeNode(JUMP, label2);
+    // Evaluate the logical expression and see if its true or false.
+    TreeNode* seq1 = new TreeNode(SEQ, logicalExpressionNode, jumpfNode);
+    
+    // For if we went in to the if statement, and need to jump to
+    // the end of the else after reading the if block
+    TreeNode* seq2 = new TreeNode(SEQ, ifBlock, jumpNode);
+    // Connect the two sequence nodes.
+    TreeNode* seq3 = new TreeNode(SEQ, seq1, seq2);
+    
+    TreeNode* seq4 = new TreeNode(SEQ, ifConditionFalseLabel, elseBlock);
+    TreeNode* seq5 = new TreeNode(SEQ, seq3, seq4);
+    
+    // Creating label which is jumped to at the end of the if block
+    // if the condition in the if statement was true
+    TreeNode* ifConditionTrueLabel = new TreeNode(LABEL, (label2 + ":"));
+    TreeNode* seq6 = new TreeNode(SEQ, seq5, ifConditionTrueLabel);
+    return seq6;
+  }
+  // For if there was only an if statement with no else pair
+  else {
+    // Jump to label1 if the condition was false. 
+    TreeNode* jumpfNode = new TreeNode(JUMPF, label1);
+    // Creating the label for where we will jump to if the condition
+    // was false. The label will be located at the end of the if block.
+    TreeNode* ifConditionFalseLabel = new TreeNode(LABEL, (label1 + ":"));
+    // First evaluate the logicalExpression, then test if it was
+    // false. If it was false, execute the jump to the end of the if block.
+    TreeNode* seq1 = new TreeNode(SEQ, logicalExpressionNode, jumpfNode);
+    
+    // If the condition was true, run through the if block and place
+    // a ifConditionFalseLabel at the end, for where we would jump
+    // to IF it WAS false.
+    TreeNode* seq2 = new TreeNode(SEQ, seq1, ifBlock);
+    
+    // Chain the other 2 sequences together.
+    TreeNode* seq3 = new TreeNode(SEQ, seq2, ifConditionFalseLabel);
+    return seq3;
+  }
+}
+
+Parser::TreeNode* Parser::whileStatement() {
+  TreeNode* logicalExpressionNode = NULL;
+  string blockBeginning;
+  string blockEnd;
+
+  check(Token::WHILE, "Expected 'while'.");
+  // Move to what should be the LPAREN, then check to see if it is
+  token = lexer.nextToken();
+  check(Token::LPAREN, "Expected '('.");
+  
+  // Move to the conditional within the parens
+  token = lexer.nextToken();
+  logicalExpressionNode = logicalExpression();
+  // Token should be at the RPAREN, so let's check if it is an RPAREN
+  check(Token::RPAREN, "Expected ')'.");
+  token = lexer.nextToken();
+  
+  // Now have a node representing the block of code in the while loop
+  symbolTable.enterScope();
+  TreeNode* blockNode = block();
+  symbolTable.exitScope();
+  
+  // Make labels that designate the beginning and end of the loop
+  blockBeginning = makeLabel();
+  blockEnd = makeLabel();
+  
+  // This label is jumped to at the end of the while block, to then
+  // check if the conditional statement is still true
+  TreeNode* blockBeginningLabel = new TreeNode(LABEL, (blockBeginning + ":"));
+  
+  // This label is at the end of the block and is jumped to if the
+  // conditional statement is false
+  TreeNode* blockEndLabel = new TreeNode(LABEL, (blockEnd + ":"));
+  
+  // Node which tells the code to jump to the label representing the
+  // end of the while loop if the conditional is false
+  TreeNode* jumpf = new TreeNode(JUMPF, blockEnd);
+  
+  // Node which tells the code to jump back to the beginning of the
+  // loop to check if the conditional is still true
+  TreeNode* jump = new TreeNode(JUMP, blockBeginning);
+  
+  // Put beginning label before the expression to be tested for true/false
+  TreeNode* seq1 = new TreeNode(SEQ, blockBeginningLabel, logicalExpressionNode);
+  // Jump to the end of the block if the logicalExpression returned false
+  TreeNode* seq2 = new TreeNode(SEQ, jumpf, blockNode);
+  // Read the block of code in the while loop (for if the condition
+  // was true)
+  TreeNode* seq3 = new TreeNode(SEQ, seq1, seq2);
+  // Jump back up to the beginning of the loop to test if the
+  // condition is still true
+  TreeNode* seq4 = new TreeNode(SEQ, jump, blockEndLabel);
+  // Create a label at the end of the block that is jumped to if the
+  // condition was false
+  TreeNode* seq5 = new TreeNode(SEQ, seq3, seq4);
+  
+  // Return the tree
+  return seq5;
+}
+
+Parser::TreeNode* Parser::assignStatement() {
+  check(Token::IDENT, "Expected IDENT.");
+  // Name of variable that is being stored with a value
+  string storedInto = token.getLexeme();
+  string uniqueSymbol = symbolTable.getUniqueSymbol(storedInto);
+  if (uniqueSymbol == "") {
+    error("Assignment of undeclared variable.");
+  }
+  // Move to what should be an "="
+  token = lexer.nextToken();
+  // Check to see if the token is an "="
+  check(Token::ASSIGN, "Expected '='.");
+  // Move to the beginning of the logical expression
+  token = lexer.nextToken();
+  // Create the logical expression node to be stored into the variable storeInto
+  TreeNode* logicalExpressionNode = logicalExpression();
+  // Make sure we have a semicolon after the logical expression
+  check(Token::SEMICOLON, "Expected ';'.");
+  token = lexer.nextToken();
+  // Create the node that indicates to store the value of the logical
+  // expression into its unique symbol
+  TreeNode* storeNode = new TreeNode(STORE, uniqueSymbol);
+  // Create the sequence node which chains the expression and the
+  // store in left to right order
+  TreeNode* seq = new TreeNode(SEQ, logicalExpressionNode, storeNode);
+  // Return the node which tells the code to evaluate the
+  // logicalExpressionNode then store that value in storedInto
+  return seq;
+}
+
+Parser::TreeNode* Parser::block() {
+  // Check if first character in the block is a LBRACE. If not, we
+  // have an error and the program is exited.
+  check(Token::LBRACE, "Expected '{'.");
+  // Move to the next token, which is the beginning of the code to be executed.
+  token = lexer.nextToken();
+  // Check if it's an empty block. If it is, simply return a sequence
+  // node with no children.
+  if (token.getType() == Token::RBRACE) {
+    token = lexer.nextToken();
+    TreeNode* emptyBlock = new TreeNode(SEQ);
+    return emptyBlock;
+  }
+  TreeNode* blockNode = statement();
+  int tokenType= token.getType();
+  TreeNode* statementNode;
+  while (tokenType != Token::RBRACE) {
+    statementNode = statement();
+
+    blockNode = new TreeNode(SEQ, blockNode, statementNode);
+    tokenType = token.getType();
+  }
+  token = lexer.nextToken();
+  return blockNode;
+}
+
+Parser::TreeNode* Parser::statement() {
+  // Can use the next word to figure out what type of statement is
+  // about to happen
+  int tokenType = token.getType();
+  TreeNode* statementNode = NULL;
+  // Check for each type of statement. Will need to add
+  // vardefstatement and returnstatement in the future. Error checking
+  // for the assignstatement is done in the assignStatement() method.
+  if (tokenType == Token::WHILE) {
+    statementNode = whileStatement();
+  }
+  else if (tokenType == Token::IF) {
+    statementNode = ifStatement();
+  }
+  // to be implemented in the future
+  else if (tokenType == Token::VAR) {
+    statementNode = vardefStatement();
+  }
+  // to be implemented in the future
+  else if (tokenType == Token::RETURN) {
+    statementNode = returnStatement();
+  }
+  else if (tokenType == Token::PRINTF) {
+    statementNode = printfStatement();
+  }
+  else if (token.getType() == Token::IDENT) {
+    statementNode = assignStatement();
+  }
+  else {
+    error("Expected a 'while', 'if', 'var', 'return', or IDENT");
+  }
+  // Return the statement and it will now be the proper statement or
+  // an error will have occurred and the program will have exited.
+  return statementNode;
+}
+
+Parser::TreeNode* Parser::funcall(string functionName) {
+  int tokenType = token.getType();
+  TreeNode* funcallNode = NULL;
+  if (tokenType == Token::RPAREN) {
+    token = lexer.nextToken();
+    funcallNode = new TreeNode(CALL, functionName);
+    return funcallNode;
+  }
+  // Retrieve the first expression
+  funcallNode = expression();
+  // Will be used for subsequent expressions
+  TreeNode* expressionNode;
+  // If there are more expressions, tokenType will be a comma after
+  // retrieving the first expression
+  tokenType = token.getType();
+  while (tokenType == Token::COMMA) {
+    // move to the beginning of the next expression
+    token = lexer.nextToken();
+    // Retrieve the next expression
+    expressionNode = expression();
+    
+    // Chain expressions together using a sequence node
+    funcallNode = new TreeNode(SEQ, funcallNode, expressionNode);
+    // Getting next token type to see if we still have more expressions
+    tokenType = token.getType();
+  }
+  check(Token::RPAREN, "Expected ')'.");
+  token = lexer.nextToken();
+  TreeNode* callNode = new TreeNode(CALL, functionName);
+  funcallNode = new TreeNode(SEQ, funcallNode, callNode);
+  return funcallNode;
+}
+
+Parser::TreeNode* Parser::vardefStatement() {
+  check(Token::VAR, "Expected 'var'.");
+  token = lexer.nextToken();
+  
+  check(Token::IDENT, "Expected 'IDENT' in vardefStatement.");
+  string identifier = token.getLexeme();
+  if (!symbolTable.addSymbol(identifier)) {
+    error("Declaration of two variables with same name in same scope");
+  }
+  token = lexer.nextToken();
+  int tokenType = token.getType();
+  while (tokenType == Token::COMMA) {
+    token = lexer.nextToken();
+    check(Token::IDENT, "Expected 'IDENT' in use of vardefStatement.");
+    identifier = token.getLexeme();
+    if (!symbolTable.addSymbol(identifier)) {
+	error("Declaration of two variables with same name in same scope");
+    }
+    token = lexer.nextToken();
+    tokenType = token.getType();
+  }
+  check(Token::SEMICOLON, "Expected ';'.");
+  token = lexer.nextToken();
+  return new TreeNode(SEQ);
+}
+
+Parser::TreeNode* Parser::returnStatement() {
+  check(Token::RETURN, "Expected 'return'.");
+  TreeNode* returnStatementNode = new TreeNode(RET);
+  token = lexer.nextToken();
+  
+  TreeNode* logicalExpressionNode = logicalExpression();
+  check(Token::SEMICOLON, "Expected ';'.");
+  token = lexer.nextToken();
+
+  return new TreeNode(SEQ, logicalExpressionNode, returnStatementNode);
+}
+
+Parser::TreeNode* Parser::function() {
+  check(Token::FUNCTION, "Expected 'function'.");
+  token = lexer.nextToken();
+
+  check(Token::IDENT, "Expected an IDENT");
+  string functionName = token.getLexeme();
+  token = lexer.nextToken();
+
+  check(Token::LPAREN, "Expected a '('");
+  token = lexer.nextToken();
+
+  functionName += ":";
+  TreeNode* functionNode = new TreeNode(FUNC, functionName);
+  TreeNode* blockNode;
+  if (token.getType() == Token::RPAREN) {
+    token = lexer.nextToken();
+    symbolTable.enterScope();
+    blockNode = block();
+    symbolTable.exitScope();
+    return new TreeNode(SEQ, functionNode, blockNode);
+  }
+  check(Token::IDENT, "Expected IDENT as parameterdef.");
+  string parameter = token.getLexeme();
+  symbolTable.enterScope();
+  params.push(parameter);
+  token = lexer.nextToken();
+  while (token.getType() == Token::COMMA) {
+    token = lexer.nextToken();
+    check(Token::IDENT, "Expected IDENT as parameterdef.");
+    parameter = token.getLexeme();
+    params.push(parameter);
+    token = lexer.nextToken();
+  }
+  check(Token::RPAREN, "Expected ')'.");
+  token = lexer.nextToken();
+  while (!params.isEmpty()) {
+    parameter = params.pop();
+    if (!symbolTable.addSymbol(parameter)) {
+      error("Declaration of variable with same name in same scope: " + parameter);
+    }
+    string uniqueSymbolParam = symbolTable.getUniqueSymbol(parameter);
+    functionNode = new TreeNode(SEQ, functionNode, new TreeNode(STORE, uniqueSymbolParam));
+  }
+  blockNode = block();
+  symbolTable.exitScope();
+  functionNode = new TreeNode(SEQ, functionNode, blockNode);
+  return functionNode;
+}
+
+Parser::TreeNode* Parser::compilationunit() {
+  if (token.getType() == Token::ENDOFFILE) {
+    return new TreeNode(SEQ);
+  }
+  check(Token::FUNCTION, "Expected FUNCTION when calling function.");
+  string functionName = token.getLexeme();
+
+  TreeNode* seqOfFunctions = function();
+  TreeNode* functionToChain;
+
+  int tokenType = token.getType();
+  while(tokenType == Token::FUNCTION) {
+    functionToChain = function();
+
+    seqOfFunctions = new TreeNode(SEQ, seqOfFunctions, functionToChain);
+    tokenType = token.getType();
+  }
+  
+  return seqOfFunctions;
+}
